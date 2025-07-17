@@ -300,10 +300,10 @@ func (c *Client) SetGithubStarProjects(employeeNumber string, starredProjects st
 }
 
 // SetUserPermission sets user permission in Higress
-func (c *Client) SetUserPermission(employeeNumber string, models []string) error {
+func (c *Client) SetUserPermission(userID string, models []string) error {
 	// Prepare request data
 	data := url.Values{}
-	data.Set("employee_number", employeeNumber)
+	data.Set("user_id", userID)
 
 	// Convert models to JSON string
 	modelsJSON, err := json.Marshal(models)
@@ -352,10 +352,10 @@ func (c *Client) SetUserPermission(employeeNumber string, models []string) error
 }
 
 // SetUserStarCheckPermission sets user star check permission in Higress
-func (c *Client) SetUserStarCheckPermission(employeeNumber string, enabled bool) error {
+func (c *Client) SetUserStarCheckPermission(userID string, enabled bool) error {
 	// Prepare request data
 	data := url.Values{}
-	data.Set("employee_number", employeeNumber)
+	data.Set("user_id", userID)
 	if enabled {
 		data.Set("enabled", "true")
 	} else {
@@ -402,10 +402,10 @@ func (c *Client) SetUserStarCheckPermission(employeeNumber string, enabled bool)
 }
 
 // SetUserQuotaCheckPermission sets user quota check permission in Higress
-func (c *Client) SetUserQuotaCheckPermission(employeeNumber string, enabled bool) error {
+func (c *Client) SetUserQuotaCheckPermission(userID string, enabled bool) error {
 	// Prepare request data
 	data := url.Values{}
-	data.Set("employee_number", employeeNumber)
+	data.Set("user_id", userID)
 	if enabled {
 		data.Set("enabled", "true")
 	} else {

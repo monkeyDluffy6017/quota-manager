@@ -216,7 +216,7 @@ type ModelWhitelist struct {
 // EffectivePermission represents the effective permissions for each employee
 type EffectivePermission struct {
 	ID              int       `gorm:"primaryKey;autoIncrement" json:"id"`
-	EmployeeNumber  string    `gorm:"uniqueIndex;not null;size:100" json:"employee_number"`
+	UserID          string    `gorm:"uniqueIndex;not null;size:255" json:"user_id"`
 	EffectiveModels string    `gorm:"type:text;not null" json:"effective_models"` // Store as comma-separated string
 	WhitelistID     *int      `gorm:"index" json:"whitelist_id"`
 	CreateTime      time.Time `gorm:"autoCreateTime" json:"create_time"`
@@ -245,12 +245,12 @@ type StarCheckSetting struct {
 
 // EffectiveStarCheckSetting represents the effective star check settings for each employee
 type EffectiveStarCheckSetting struct {
-	ID             int       `gorm:"primaryKey;autoIncrement" json:"id"`
-	EmployeeNumber string    `gorm:"uniqueIndex;not null;size:100" json:"employee_number"`
-	Enabled        bool      `gorm:"not null" json:"enabled"` // effective star check setting
-	SettingID      *int      `gorm:"index" json:"setting_id"`
-	CreateTime     time.Time `gorm:"autoCreateTime" json:"create_time"`
-	UpdateTime     time.Time `gorm:"autoUpdateTime" json:"update_time"`
+	ID         int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID     string    `gorm:"uniqueIndex;not null;size:255" json:"user_id"`
+	Enabled    bool      `gorm:"not null" json:"enabled"` // effective star check setting
+	SettingID  *int      `gorm:"index" json:"setting_id"`
+	CreateTime time.Time `gorm:"autoCreateTime" json:"create_time"`
+	UpdateTime time.Time `gorm:"autoUpdateTime" json:"update_time"`
 }
 
 // QuotaCheckSetting represents quota check settings for users/departments
@@ -265,12 +265,12 @@ type QuotaCheckSetting struct {
 
 // EffectiveQuotaCheckSetting represents the effective quota check settings for each employee
 type EffectiveQuotaCheckSetting struct {
-	ID             int       `gorm:"primaryKey;autoIncrement" json:"id"`
-	EmployeeNumber string    `gorm:"uniqueIndex;not null;size:100" json:"employee_number"`
-	Enabled        bool      `gorm:"not null;default:false" json:"enabled"` // effective quota check setting
-	SettingID      *int      `gorm:"index" json:"setting_id"`
-	CreateTime     time.Time `gorm:"autoCreateTime" json:"create_time"`
-	UpdateTime     time.Time `gorm:"autoUpdateTime" json:"update_time"`
+	ID         int       `gorm:"primaryKey;autoIncrement" json:"id"`
+	UserID     string    `gorm:"uniqueIndex;not null;size:255" json:"user_id"`
+	Enabled    bool      `gorm:"not null;default:false" json:"enabled"` // effective quota check setting
+	SettingID  *int      `gorm:"index" json:"setting_id"`
+	CreateTime time.Time `gorm:"autoCreateTime" json:"create_time"`
+	UpdateTime time.Time `gorm:"autoUpdateTime" json:"update_time"`
 }
 
 // GetDeptFullLevelNamesAsSlice returns the department full level names as a slice

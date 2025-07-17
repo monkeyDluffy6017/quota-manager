@@ -21,7 +21,7 @@ type StarCheckPermissionService struct {
 
 // HigressStarCheckClient interface for Higress star check permission management
 type HigressStarCheckClient interface {
-	SetUserStarCheckPermission(employeeNumber string, enabled bool) error
+	SetUserStarCheckPermission(userID string, enabled bool) error
 }
 
 // NewStarCheckPermissionService creates a new star check permission service
@@ -35,20 +35,18 @@ func NewStarCheckPermissionService(db *database.DB, aiGatewayConf *config.AiGate
 }
 
 // SetUserStarCheckSetting sets star check setting for a user
-func (s *StarCheckPermissionService) SetUserStarCheckSetting(employeeNumber string, enabled bool) error {
-	// Check if user exists when employee_sync is enabled
-	if s.employeeSyncConf.Enabled {
-		var employee models.EmployeeDepartment
-		err := s.db.DB.Where("employee_number = ?", employeeNumber).First(&employee).Error
-		if err != nil {
-			return NewUserNotFoundError(employeeNumber)
-		}
+func (s *StarCheckPermissionService) SetUserStarCheckSetting(userID string, enabled bool) error {
+	// Check if user exists in auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("id = ?", userID).First(&user).Error
+	if err != nil {
+		return NewUserNotFoundError(userID)
 	}
 
 	// Check if setting already exists
 	var setting models.StarCheckSetting
-	err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).First(&setting).Error
+	err = s.db.DB.Where("target_type = ? AND target_identifier = ?",
+		models.TargetTypeUser, userID).First(&setting).Error
 
 	if err == nil {
 		// Check if setting is the same
@@ -66,7 +64,7 @@ func (s *StarCheckPermissionService) SetUserStarCheckSetting(employeeNumber stri
 		// Create new setting
 		setting = models.StarCheckSetting{
 			TargetType:       models.TargetTypeUser,
-			TargetIdentifier: employeeNumber,
+			TargetIdentifier: userID,
 			Enabled:          enabled,
 		}
 		if err := s.db.DB.Create(&setting).Error; err != nil {
@@ -74,20 +72,21 @@ func (s *StarCheckPermissionService) SetUserStarCheckSetting(employeeNumber stri
 		}
 	}
 
-	// Update employee star check permissions
-	if err := s.UpdateEmployeeStarCheckPermissions(employeeNumber); err != nil {
-		logger.Logger.Error("Failed to update employee star check permissions",
-			zap.String("employee_number", employeeNumber),
+	// Update employee star check permissions using employee_number for department lookup
+	if err := s.UpdateEmployeeStarCheckPermissions(user.EmployeeNumber); err != nil {
+		logger.Logger.Error("Failed to update user star check permissions",
+			zap.String("user_id", userID),
+			zap.String("employee_number", user.EmployeeNumber),
 			zap.Error(err))
 		// Continue execution - setting is already saved
 	}
 
 	// Record audit
 	auditDetails := map[string]interface{}{
-		"employee_number": employeeNumber,
-		"enabled":         enabled,
+		"user_id": userID,
+		"enabled": enabled,
 	}
-	s.recordAudit(models.OperationStarCheckSet, models.TargetTypeUser, employeeNumber, auditDetails)
+	s.recordAudit(models.OperationStarCheckSet, models.TargetTypeUser, userID, auditDetails)
 
 	return nil
 }
@@ -156,7 +155,7 @@ func (s *StarCheckPermissionService) SetDepartmentStarCheckSetting(departmentNam
 func (s *StarCheckPermissionService) GetUserEffectiveStarCheckSetting(employeeNumber string) (bool, error) {
 	// Get effective setting directly, no need to check if employee exists
 	var effectiveSetting models.EffectiveStarCheckSetting
-	err := s.db.DB.Where("employee_number = ?", employeeNumber).First(&effectiveSetting).Error
+	err := s.db.DB.Where("user_id = ?", employeeNumber).First(&effectiveSetting).Error
 	if err != nil {
 		return false, nil // Return default (disabled) if no setting found
 	}
@@ -178,10 +177,18 @@ func (s *StarCheckPermissionService) GetDepartmentStarCheckSetting(departmentNam
 
 // UpdateEmployeeStarCheckPermissions updates effective star check settings for an employee
 func (s *StarCheckPermissionService) UpdateEmployeeStarCheckPermissions(employeeNumber string) error {
+	// First, get user_id from auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+	if err != nil {
+		// User doesn't exist in auth_users table, skip processing
+		return nil
+	}
+	userID := user.ID
+
 	// Get employee info (optional for non-existent users)
 	var employee models.EmployeeDepartment
 	var departments []string
-	var err error
 
 	err = s.db.DB.Where("employee_number = ?", employeeNumber).First(&employee).Error
 	if err != nil {
@@ -195,7 +202,7 @@ func (s *StarCheckPermissionService) UpdateEmployeeStarCheckPermissions(employee
 	// Get current effective setting from database (if exists)
 	var currentEnabled bool
 	var existingEffectiveSetting models.EffectiveStarCheckSetting
-	err = s.db.DB.Where("employee_number = ?", employeeNumber).First(&existingEffectiveSetting).Error
+	err = s.db.DB.Where("user_id = ?", userID).First(&existingEffectiveSetting).Error
 	if err == nil {
 		currentEnabled = existingEffectiveSetting.Enabled
 	} else {
@@ -204,7 +211,7 @@ func (s *StarCheckPermissionService) UpdateEmployeeStarCheckPermissions(employee
 	}
 
 	// Calculate new effective setting
-	newEnabled, settingID := s.calculateEffectiveStarCheckSetting(employeeNumber, departments)
+	newEnabled, settingID := s.calculateEffectiveStarCheckSetting(userID, departments)
 
 	// Check if setting has actually changed
 	settingChanged := currentEnabled != newEnabled
@@ -225,9 +232,9 @@ func (s *StarCheckPermissionService) UpdateEmployeeStarCheckPermissions(employee
 	} else {
 		// Create new record
 		effectiveSetting := models.EffectiveStarCheckSetting{
-			EmployeeNumber: employeeNumber,
-			Enabled:        newEnabled,
-			SettingID:      settingID,
+			UserID:    userID,
+			Enabled:   newEnabled,
+			SettingID: settingID,
 		}
 		if err := s.db.DB.Create(&effectiveSetting).Error; err != nil {
 			return fmt.Errorf("failed to create effective star check setting: %w", err)
@@ -258,18 +265,30 @@ func (s *StarCheckPermissionService) UpdateEmployeeStarCheckPermissions(employee
 
 	// Notify Higress if needed
 	if shouldNotify && s.higressClient != nil {
-		if err := s.higressClient.SetUserStarCheckPermission(employeeNumber, newEnabled); err != nil {
-			logger.Logger.Error("Failed to notify Higress about star check setting change",
+		// Convert employee_number back to user_id for Higress API
+		var user models.UserInfo
+		err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+		if err != nil {
+			logger.Logger.Error("Failed to find user by employee_number for Higress call",
 				zap.String("employee_number", employeeNumber),
-				zap.Bool("new_enabled", newEnabled),
-				zap.String("reason", notificationReason),
 				zap.Error(err))
 			// Don't return error - setting is already saved in database
 		} else {
-			logger.Logger.Info("Successfully notified Higress about star check setting change",
-				zap.String("employee_number", employeeNumber),
-				zap.Bool("new_enabled", newEnabled),
-				zap.String("reason", notificationReason))
+			if err := s.higressClient.SetUserStarCheckPermission(user.ID, newEnabled); err != nil {
+				logger.Logger.Error("Failed to notify Higress about star check setting change",
+					zap.String("employee_number", employeeNumber),
+					zap.String("user_id", user.ID),
+					zap.Bool("new_enabled", newEnabled),
+					zap.String("reason", notificationReason),
+					zap.Error(err))
+				// Don't return error - setting is already saved in database
+			} else {
+				logger.Logger.Info("Successfully notified Higress about star check setting change",
+					zap.String("employee_number", employeeNumber),
+					zap.String("user_id", user.ID),
+					zap.Bool("new_enabled", newEnabled),
+					zap.String("reason", notificationReason))
+			}
 		}
 	}
 
@@ -311,15 +330,15 @@ func (s *StarCheckPermissionService) UpdateDepartmentStarCheckPermissions(depart
 	return nil
 }
 
-// calculateEffectiveStarCheckSetting calculates effective star check setting for an employee
-func (s *StarCheckPermissionService) calculateEffectiveStarCheckSetting(employeeNumber string, departments []string) (bool, *int) {
+// calculateEffectiveStarCheckSetting calculates effective star check setting for a user
+func (s *StarCheckPermissionService) calculateEffectiveStarCheckSetting(userID string, departments []string) (bool, *int) {
 	// Priority: User setting > Department setting (most specific department first)
 	// Default: disabled (false)
 
 	// Check user setting first
 	var userSetting models.StarCheckSetting
 	err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).First(&userSetting).Error
+		models.TargetTypeUser, userID).First(&userSetting).Error
 	if err == nil {
 		return userSetting.Enabled, &userSetting.ID
 	}
@@ -353,57 +372,78 @@ func (s *StarCheckPermissionService) slicesEqual(a, b []string) bool {
 
 // RemoveUserCompletely removes all star check data associated with a user when they are deleted
 func (s *StarCheckPermissionService) RemoveUserCompletely(employeeNumber string) error {
-	// Remove user star check settings (if exists)
+	// First, get user_id from auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+	if err != nil {
+		// User doesn't exist in auth_users table, but we still need to clean up by employeeNumber
+		// for backward compatibility
+	}
+	var userID string
+	if err == nil {
+		userID = user.ID
+	}
+
+	// Remove user star check settings (if exists) - use userID for target_identifier if available, otherwise employeeNumber
+	targetIdentifier := employeeNumber
+	if userID != "" {
+		targetIdentifier = userID
+	}
 	var userSetting models.StarCheckSetting
-	err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).First(&userSetting).Error
+	err = s.db.DB.Where("target_type = ? AND target_identifier = ?",
+		models.TargetTypeUser, targetIdentifier).First(&userSetting).Error
 	if err == nil {
 		// Delete user star check setting
 		if err := s.db.DB.Delete(&userSetting).Error; err != nil {
 			logger.Logger.Error("Failed to delete user star check setting during complete removal",
 				zap.String("employee_number", employeeNumber),
+				zap.String("target_identifier", targetIdentifier),
 				zap.Error(err))
 			// Continue with removal even if star check setting deletion fails
 		}
 	}
 
-	// Remove effective star check settings
-	var effectiveSetting models.EffectiveStarCheckSetting
-	err = s.db.DB.Where("employee_number = ?", employeeNumber).First(&effectiveSetting).Error
-	if err == nil {
-		// Record what we're removing for audit
-		removedEnabled := effectiveSetting.Enabled
+	// Remove effective star check settings - use userID if available
+	if userID != "" {
+		var effectiveSetting models.EffectiveStarCheckSetting
+		err = s.db.DB.Where("user_id = ?", userID).First(&effectiveSetting).Error
+		if err == nil {
+			// Record what we're removing for audit
+			removedEnabled := effectiveSetting.Enabled
 
-		// Notify Higress to clear star check setting if user had explicit setting
-		if s.higressClient != nil {
-			if err := s.higressClient.SetUserStarCheckPermission(employeeNumber, false); err != nil {
-				logger.Logger.Error("Failed to clear Higress star check permission for removed user",
-					zap.String("employee_number", employeeNumber),
-					zap.Bool("removed_enabled", removedEnabled),
-					zap.Error(err))
-			} else {
-				logger.Logger.Info("Successfully cleared Higress star check permission for removed user",
-					zap.String("employee_number", employeeNumber),
-					zap.Bool("removed_enabled", removedEnabled))
+			// Notify Higress to clear star check setting if user had explicit setting
+			if s.higressClient != nil {
+				if err := s.higressClient.SetUserStarCheckPermission(userID, false); err != nil {
+					logger.Logger.Error("Failed to clear Higress star check permission for removed user",
+						zap.String("employee_number", employeeNumber),
+						zap.String("user_id", userID),
+						zap.Bool("removed_enabled", removedEnabled),
+						zap.Error(err))
+				} else {
+					logger.Logger.Info("Successfully cleared Higress star check permission for removed user",
+						zap.String("employee_number", employeeNumber),
+						zap.String("user_id", userID),
+						zap.Bool("removed_enabled", removedEnabled))
+				}
 			}
-		}
 
-		if err := s.db.DB.Delete(&effectiveSetting).Error; err != nil {
-			return fmt.Errorf("failed to delete effective star check setting: %w", err)
-		}
+			if err := s.db.DB.Delete(&effectiveSetting).Error; err != nil {
+				return fmt.Errorf("failed to delete effective star check setting: %w", err)
+			}
 
-		// Record audit
-		auditDetails := map[string]interface{}{
-			"employee_number":  employeeNumber,
-			"reason":           "employee_removal",
-			"removed_enabled":  removedEnabled,
-			"higress_notified": s.higressClient != nil,
-		}
-		s.recordAudit("user_star_check_complete_removal", models.TargetTypeUser, employeeNumber, auditDetails)
+			// Record audit
+			auditDetails := map[string]interface{}{
+				"employee_number":  employeeNumber,
+				"reason":           "employee_removal",
+				"removed_enabled":  removedEnabled,
+				"higress_notified": s.higressClient != nil,
+			}
+			s.recordAudit("user_star_check_complete_removal", models.TargetTypeUser, employeeNumber, auditDetails)
 
-		logger.Logger.Info("Completely removed user star check data",
-			zap.String("employee_number", employeeNumber),
-			zap.Bool("removed_enabled", removedEnabled))
+			logger.Logger.Info("Completely removed user star check data",
+				zap.String("employee_number", employeeNumber),
+				zap.Bool("removed_enabled", removedEnabled))
+		}
 	}
 
 	return nil

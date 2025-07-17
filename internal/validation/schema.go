@@ -43,6 +43,7 @@ func registerCustomValidators() {
 	// Register custom validators for permission management
 	schemaValidator.RegisterValidation("employee_number", validateEmployeeNumber)
 	schemaValidator.RegisterValidation("department_name", validateDepartmentName)
+	schemaValidator.RegisterValidation("uuid", validateUUID)
 }
 
 // validateCron validates cron expression using our existing function
@@ -61,6 +62,31 @@ func validateEmployeeNumber(fl validator.FieldLevel) bool {
 	for _, char := range employeeNumber {
 		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9')) {
 			return false
+		}
+	}
+	return true
+}
+
+// validateUUID validates UUID format
+func validateUUID(fl validator.FieldLevel) bool {
+	uuid := fl.Field().String()
+	if len(uuid) != 36 {
+		return false
+	}
+
+	// Check UUID format: 8-4-4-4-12 hex characters separated by hyphens
+	// Example: 123e4567-e89b-12d3-a456-426614174000
+	for i, char := range uuid {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			// These positions should be hyphens
+			if char != '-' {
+				return false
+			}
+		} else {
+			// These positions should be hex characters
+			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+				return false
+			}
 		}
 	}
 	return true
@@ -170,7 +196,7 @@ func getErrorMessage(err validator.FieldError) string {
 	case "required":
 		return fmt.Sprintf("%s is required", field)
 	case "uuid":
-		return fmt.Sprintf("%s must be a valid UUID format", field)
+		return fmt.Sprintf("%s must be a valid UUID format (e.g., 123e4567-e89b-12d3-a456-426614174000)", field)
 	case "cron":
 		return fmt.Sprintf("%s must be a valid cron expression", field)
 	case "strategy_type":

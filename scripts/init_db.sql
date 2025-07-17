@@ -152,7 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_employee_department_dept_full_level_names ON empl
 CREATE TABLE IF NOT EXISTS model_whitelist (
     id SERIAL PRIMARY KEY,
     target_type VARCHAR(20) NOT NULL,  -- 'user' or 'department'
-    target_identifier VARCHAR(500) NOT NULL,  -- employee_number for user, department name for department
+    target_identifier VARCHAR(500) NOT NULL,  -- user_id for user, department name for department
     allowed_models TEXT NOT NULL,
     create_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP
@@ -169,7 +169,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_model_whitelist_unique ON model_whitelist(
 -- Effective permissions table
 CREATE TABLE IF NOT EXISTS effective_permissions (
     id SERIAL PRIMARY KEY,
-    employee_number VARCHAR(100) UNIQUE NOT NULL,
+    user_id VARCHAR(255) UNIQUE NOT NULL,
     effective_models TEXT NOT NULL,
     whitelist_id INTEGER,
     create_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP,
@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS effective_permissions (
 );
 
 -- Create indexes for effective_permissions table
-CREATE INDEX IF NOT EXISTS idx_effective_permissions_employee ON effective_permissions(employee_number);
+CREATE INDEX IF NOT EXISTS idx_effective_permissions_user_id ON effective_permissions(user_id);
 CREATE INDEX IF NOT EXISTS idx_effective_permissions_whitelist ON effective_permissions(whitelist_id);
 CREATE INDEX IF NOT EXISTS idx_effective_permissions_effective_models ON effective_permissions(effective_models);
 
@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS permission_audit (
     id SERIAL PRIMARY KEY,
     operation VARCHAR(50) NOT NULL,  -- 'employee_sync', 'whitelist_set', 'permission_updated', etc.
     target_type VARCHAR(20),  -- 'user' or 'department'
-    target_identifier VARCHAR(500),
+    target_identifier VARCHAR(500),  -- user_id for user, department name for department
     details TEXT,  -- JSON string with operation details
     create_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP
 );
@@ -202,7 +202,7 @@ CREATE INDEX IF NOT EXISTS idx_permission_audit_create_time ON permission_audit(
 CREATE TABLE IF NOT EXISTS star_check_settings (
     id SERIAL PRIMARY KEY,
     target_type VARCHAR(20) NOT NULL,  -- 'user' or 'department'
-    target_identifier VARCHAR(500) NOT NULL,  -- employee_number for user, department name for department
+    target_identifier VARCHAR(500) NOT NULL,  -- user_id for user, department name for department
     enabled BOOLEAN NOT NULL DEFAULT false,  -- star check enabled or disabled
     create_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP
@@ -218,7 +218,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_star_check_settings_unique ON star_check_s
 -- Effective star check settings table
 CREATE TABLE IF NOT EXISTS effective_star_check_settings (
     id SERIAL PRIMARY KEY,
-    employee_number VARCHAR(100) UNIQUE NOT NULL,
+    user_id VARCHAR(255) UNIQUE NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT false,  -- effective star check setting
     setting_id INTEGER,
     create_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP,
@@ -227,14 +227,14 @@ CREATE TABLE IF NOT EXISTS effective_star_check_settings (
 );
 
 -- Create indexes for effective_star_check_settings table
-CREATE INDEX IF NOT EXISTS idx_effective_star_check_settings_employee ON effective_star_check_settings(employee_number);
+CREATE INDEX IF NOT EXISTS idx_effective_star_check_settings_user_id ON effective_star_check_settings(user_id);
 CREATE INDEX IF NOT EXISTS idx_effective_star_check_settings_setting ON effective_star_check_settings(setting_id);
 
 -- Quota check settings table
 CREATE TABLE IF NOT EXISTS quota_check_settings (
     id SERIAL PRIMARY KEY,
     target_type VARCHAR(20) NOT NULL,  -- 'user' or 'department'
-    target_identifier VARCHAR(500) NOT NULL,  -- employee_number for user, department name for department
+    target_identifier VARCHAR(500) NOT NULL,  -- user_id for user, department name for department
     enabled BOOLEAN NOT NULL DEFAULT false,  -- quota check enabled or disabled
     create_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP,
     update_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP
@@ -250,7 +250,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_quota_check_settings_unique ON quota_check
 -- Effective quota check settings table
 CREATE TABLE IF NOT EXISTS effective_quota_check_settings (
     id SERIAL PRIMARY KEY,
-    employee_number VARCHAR(100) UNIQUE NOT NULL,
+    user_id VARCHAR(255) UNIQUE NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT false,  -- effective quota check setting
     setting_id INTEGER,
     create_time TIMESTAMPTZ(0) DEFAULT CURRENT_TIMESTAMP,
@@ -259,5 +259,5 @@ CREATE TABLE IF NOT EXISTS effective_quota_check_settings (
 );
 
 -- Create indexes for effective_quota_check_settings table
-CREATE INDEX IF NOT EXISTS idx_effective_quota_check_settings_employee ON effective_quota_check_settings(employee_number);
+CREATE INDEX IF NOT EXISTS idx_effective_quota_check_settings_user_id ON effective_quota_check_settings(user_id);
 CREATE INDEX IF NOT EXISTS idx_effective_quota_check_settings_setting ON effective_quota_check_settings(setting_id);

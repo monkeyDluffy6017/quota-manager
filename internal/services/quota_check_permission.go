@@ -13,42 +13,42 @@ import (
 
 // QuotaCheckPermissionService handles quota check permission management
 type QuotaCheckPermissionService struct {
-	db               *database.DB
-	aiGatewayConf    *config.AiGatewayConfig
-	employeeSyncConf *config.EmployeeSyncConfig
-	higressClient    HigressQuotaCheckClient
+	db                    *database.DB
+	aiGatewayConf         *config.AiGatewayConfig
+	employeeSyncConf      *config.EmployeeSyncConfig
+	higressClient         HigressQuotaCheckClient
+	userConversionService *UserConversionService
 }
 
 // HigressQuotaCheckClient interface for Higress quota check permission management
 type HigressQuotaCheckClient interface {
-	SetUserQuotaCheckPermission(employeeNumber string, enabled bool) error
+	SetUserQuotaCheckPermission(userID string, enabled bool) error
 }
 
 // NewQuotaCheckPermissionService creates a new quota check permission service
-func NewQuotaCheckPermissionService(db *database.DB, aiGatewayConf *config.AiGatewayConfig, employeeSyncConf *config.EmployeeSyncConfig, higressClient HigressQuotaCheckClient) *QuotaCheckPermissionService {
+func NewQuotaCheckPermissionService(db *database.DB, aiGatewayConf *config.AiGatewayConfig, employeeSyncConf *config.EmployeeSyncConfig, higressClient HigressQuotaCheckClient, userConversionService *UserConversionService) *QuotaCheckPermissionService {
 	return &QuotaCheckPermissionService{
-		db:               db,
-		aiGatewayConf:    aiGatewayConf,
-		employeeSyncConf: employeeSyncConf,
-		higressClient:    higressClient,
+		db:                    db,
+		aiGatewayConf:         aiGatewayConf,
+		employeeSyncConf:      employeeSyncConf,
+		higressClient:         higressClient,
+		userConversionService: userConversionService,
 	}
 }
 
 // SetUserQuotaCheckSetting sets quota check setting for a user
-func (s *QuotaCheckPermissionService) SetUserQuotaCheckSetting(employeeNumber string, enabled bool) error {
-	// Check if user exists when employee_sync is enabled
-	if s.employeeSyncConf.Enabled {
-		var employee models.EmployeeDepartment
-		err := s.db.DB.Where("employee_number = ?", employeeNumber).First(&employee).Error
-		if err != nil {
-			return NewUserNotFoundError(employeeNumber)
-		}
+func (s *QuotaCheckPermissionService) SetUserQuotaCheckSetting(userID string, enabled bool) error {
+	// Check if user exists in auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("id = ?", userID).First(&user).Error
+	if err != nil {
+		return NewUserNotFoundError(userID)
 	}
 
 	// Check if setting already exists
 	var setting models.QuotaCheckSetting
-	err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).First(&setting).Error
+	err = s.db.DB.Where("target_type = ? AND target_identifier = ?",
+		models.TargetTypeUser, userID).First(&setting).Error
 
 	if err == nil {
 		// Check if setting is the same
@@ -66,7 +66,7 @@ func (s *QuotaCheckPermissionService) SetUserQuotaCheckSetting(employeeNumber st
 		// Create new setting
 		setting = models.QuotaCheckSetting{
 			TargetType:       models.TargetTypeUser,
-			TargetIdentifier: employeeNumber,
+			TargetIdentifier: userID,
 			Enabled:          enabled,
 		}
 		if err := s.db.DB.Create(&setting).Error; err != nil {
@@ -74,20 +74,21 @@ func (s *QuotaCheckPermissionService) SetUserQuotaCheckSetting(employeeNumber st
 		}
 	}
 
-	// Update employee quota check permissions
-	if err := s.UpdateEmployeeQuotaCheckPermissions(employeeNumber); err != nil {
-		logger.Logger.Error("Failed to update employee quota check permissions",
-			zap.String("employee_number", employeeNumber),
+	// Update employee quota check permissions using employee_number for department lookup
+	if err := s.UpdateEmployeeQuotaCheckPermissions(user.EmployeeNumber); err != nil {
+		logger.Logger.Error("Failed to update user quota check permissions",
+			zap.String("user_id", userID),
+			zap.String("employee_number", user.EmployeeNumber),
 			zap.Error(err))
 		// Continue execution - setting is already saved
 	}
 
 	// Record audit
 	auditDetails := map[string]interface{}{
-		"employee_number": employeeNumber,
-		"enabled":         enabled,
+		"user_id": userID,
+		"enabled": enabled,
 	}
-	s.recordAudit(models.OperationQuotaCheckSet, models.TargetTypeUser, employeeNumber, auditDetails)
+	s.recordAudit(models.OperationQuotaCheckSet, models.TargetTypeUser, userID, auditDetails)
 
 	return nil
 }
@@ -156,7 +157,7 @@ func (s *QuotaCheckPermissionService) SetDepartmentQuotaCheckSetting(departmentN
 func (s *QuotaCheckPermissionService) GetUserEffectiveQuotaCheckSetting(employeeNumber string) (bool, error) {
 	// Get effective setting directly, no need to check if employee exists
 	var effectiveSetting models.EffectiveQuotaCheckSetting
-	err := s.db.DB.Where("employee_number = ?", employeeNumber).First(&effectiveSetting).Error
+	err := s.db.DB.Where("user_id = ?", employeeNumber).First(&effectiveSetting).Error
 	if err != nil {
 		return false, nil // Return default (disabled) if no setting found
 	}
@@ -178,10 +179,18 @@ func (s *QuotaCheckPermissionService) GetDepartmentQuotaCheckSetting(departmentN
 
 // UpdateEmployeeQuotaCheckPermissions updates effective quota check settings for an employee
 func (s *QuotaCheckPermissionService) UpdateEmployeeQuotaCheckPermissions(employeeNumber string) error {
+	// First, get user_id from auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+	if err != nil {
+		// User doesn't exist in auth_users table, skip processing
+		return nil
+	}
+	userID := user.ID
+
 	// Get employee info (optional for non-existent users)
 	var employee models.EmployeeDepartment
 	var departments []string
-	var err error
 
 	err = s.db.DB.Where("employee_number = ?", employeeNumber).First(&employee).Error
 	if err != nil {
@@ -195,7 +204,7 @@ func (s *QuotaCheckPermissionService) UpdateEmployeeQuotaCheckPermissions(employ
 	// Get current effective setting from database (if exists)
 	var currentEnabled bool
 	var existingEffectiveSetting models.EffectiveQuotaCheckSetting
-	err = s.db.DB.Where("employee_number = ?", employeeNumber).First(&existingEffectiveSetting).Error
+	err = s.db.DB.Where("user_id = ?", userID).First(&existingEffectiveSetting).Error
 	if err == nil {
 		currentEnabled = existingEffectiveSetting.Enabled
 	} else {
@@ -204,7 +213,7 @@ func (s *QuotaCheckPermissionService) UpdateEmployeeQuotaCheckPermissions(employ
 	}
 
 	// Calculate new effective setting
-	newEnabled, settingID := s.calculateEffectiveQuotaCheckSetting(employeeNumber, departments)
+	newEnabled, settingID := s.calculateEffectiveQuotaCheckSetting(userID, departments)
 
 	// Check if setting has actually changed
 	settingChanged := currentEnabled != newEnabled
@@ -224,9 +233,9 @@ func (s *QuotaCheckPermissionService) UpdateEmployeeQuotaCheckPermissions(employ
 	} else {
 		// Create new record
 		effectiveSetting := models.EffectiveQuotaCheckSetting{
-			EmployeeNumber: employeeNumber,
-			Enabled:        newEnabled,
-			SettingID:      settingID,
+			UserID:    userID,
+			Enabled:   newEnabled,
+			SettingID: settingID,
 		}
 		if err := s.db.DB.Create(&effectiveSetting).Error; err != nil {
 			return fmt.Errorf("failed to create effective quota check setting: %w", err)
@@ -257,18 +266,29 @@ func (s *QuotaCheckPermissionService) UpdateEmployeeQuotaCheckPermissions(employ
 
 	// Notify Higress if needed
 	if shouldNotify && s.higressClient != nil {
-		if err := s.higressClient.SetUserQuotaCheckPermission(employeeNumber, newEnabled); err != nil {
-			logger.Logger.Error("Failed to notify Higress about quota check setting change",
+		// Convert employee_number back to user_id for Higress API
+		userID, err := s.ConvertEmployeeNumberToUserID(employeeNumber)
+		if err != nil {
+			logger.Logger.Error("Failed to convert employee_number to user_id for Higress call",
 				zap.String("employee_number", employeeNumber),
-				zap.Bool("new_enabled", newEnabled),
-				zap.String("reason", notificationReason),
 				zap.Error(err))
 			// Don't return error - setting is already saved in database
 		} else {
-			logger.Logger.Info("Successfully notified Higress about quota check setting change",
-				zap.String("employee_number", employeeNumber),
-				zap.Bool("new_enabled", newEnabled),
-				zap.String("reason", notificationReason))
+			if err := s.higressClient.SetUserQuotaCheckPermission(userID, newEnabled); err != nil {
+				logger.Logger.Error("Failed to notify Higress about quota check setting change",
+					zap.String("employee_number", employeeNumber),
+					zap.String("user_id", userID),
+					zap.Bool("new_enabled", newEnabled),
+					zap.String("reason", notificationReason),
+					zap.Error(err))
+				// Don't return error - setting is already saved in database
+			} else {
+				logger.Logger.Info("Successfully notified Higress about quota check setting change",
+					zap.String("employee_number", employeeNumber),
+					zap.String("user_id", userID),
+					zap.Bool("new_enabled", newEnabled),
+					zap.String("reason", notificationReason))
+			}
 		}
 	}
 
@@ -306,15 +326,15 @@ func (s *QuotaCheckPermissionService) UpdateDepartmentQuotaCheckPermissions(depa
 	return nil
 }
 
-// calculateEffectiveQuotaCheckSetting calculates effective quota check setting for an employee
-func (s *QuotaCheckPermissionService) calculateEffectiveQuotaCheckSetting(employeeNumber string, departments []string) (bool, *int) {
+// calculateEffectiveQuotaCheckSetting calculates effective quota check setting for a user
+func (s *QuotaCheckPermissionService) calculateEffectiveQuotaCheckSetting(userID string, departments []string) (bool, *int) {
 	// Priority: User setting > Department setting (most specific department first)
 	// Default: disabled (false)
 
 	// Check user setting first
 	var userSetting models.QuotaCheckSetting
 	err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).First(&userSetting).Error
+		models.TargetTypeUser, userID).First(&userSetting).Error
 	if err == nil {
 		return userSetting.Enabled, &userSetting.ID
 	}
@@ -351,21 +371,37 @@ func (s *QuotaCheckPermissionService) RemoveUserCompletely(employeeNumber string
 	logger.Logger.Info("Removing all quota check data for user",
 		zap.String("employee_number", employeeNumber))
 
-	// Remove user quota check setting
+	// First, get user_id from auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+	var userID string
+	if err == nil {
+		userID = user.ID
+	}
+
+	// Remove user quota check setting - use userID for target_identifier if available, otherwise employeeNumber
+	targetIdentifier := employeeNumber
+	if userID != "" {
+		targetIdentifier = userID
+	}
 	if err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).Delete(&models.QuotaCheckSetting{}).Error; err != nil {
+		models.TargetTypeUser, targetIdentifier).Delete(&models.QuotaCheckSetting{}).Error; err != nil {
 		logger.Logger.Error("Failed to remove user quota check setting",
 			zap.String("employee_number", employeeNumber),
+			zap.String("target_identifier", targetIdentifier),
 			zap.Error(err))
 		// Continue with other cleanup even if this fails
 	}
 
-	// Remove effective quota check setting
-	if err := s.db.DB.Where("employee_number = ?", employeeNumber).Delete(&models.EffectiveQuotaCheckSetting{}).Error; err != nil {
-		logger.Logger.Error("Failed to remove effective quota check setting",
-			zap.String("employee_number", employeeNumber),
-			zap.Error(err))
-		// Continue with other cleanup even if this fails
+	// Remove effective quota check setting - use userID if available
+	if userID != "" {
+		if err := s.db.DB.Where("user_id = ?", userID).Delete(&models.EffectiveQuotaCheckSetting{}).Error; err != nil {
+			logger.Logger.Error("Failed to remove effective quota check setting",
+				zap.String("employee_number", employeeNumber),
+				zap.String("user_id", userID),
+				zap.Error(err))
+			// Continue with other cleanup even if this fails
+		}
 	}
 
 	logger.Logger.Info("Successfully removed quota check data for user",
@@ -387,4 +423,20 @@ func (s *QuotaCheckPermissionService) recordAudit(operation, targetType, targetI
 	if err := s.db.DB.Create(audit).Error; err != nil {
 		logger.Logger.Error("Failed to record audit", zap.Error(err))
 	}
+}
+
+// ConvertUserIDToEmployeeNumber converts user_id to employee_number for backward compatibility
+func (s *QuotaCheckPermissionService) ConvertUserIDToEmployeeNumber(userID string) (string, error) {
+	if s.userConversionService == nil {
+		return "", fmt.Errorf("user conversion service not initialized")
+	}
+	return s.userConversionService.GetEmployeeNumberByUserID(userID)
+}
+
+// ConvertEmployeeNumberToUserID converts employee_number to user_id for forward compatibility
+func (s *QuotaCheckPermissionService) ConvertEmployeeNumberToUserID(employeeNumber string) (string, error) {
+	if s.userConversionService == nil {
+		return "", fmt.Errorf("user conversion service not initialized")
+	}
+	return s.userConversionService.GetUserIDByEmployeeNumber(employeeNumber)
 }

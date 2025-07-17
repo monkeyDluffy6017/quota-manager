@@ -21,7 +21,7 @@ type PermissionService struct {
 
 // HigressClient interface for Higress permission management
 type HigressClient interface {
-	SetUserPermission(employeeNumber string, modelList []string) error
+	SetUserPermission(userID string, modelList []string) error
 }
 
 // NewPermissionService creates a new permission service
@@ -35,20 +35,18 @@ func NewPermissionService(db *database.DB, aiGatewayConf *config.AiGatewayConfig
 }
 
 // SetUserWhitelist sets whitelist for a user
-func (s *PermissionService) SetUserWhitelist(employeeNumber string, modelList []string) error {
-	// Check if user exists when employee_sync is enabled
-	if s.employeeSyncConf.Enabled {
-		var employee models.EmployeeDepartment
-		err := s.db.DB.Where("employee_number = ?", employeeNumber).First(&employee).Error
-		if err != nil {
-			return NewUserNotFoundError(employeeNumber)
-		}
+func (s *PermissionService) SetUserWhitelist(userID string, modelList []string) error {
+	// Check if user exists in auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("id = ?", userID).First(&user).Error
+	if err != nil {
+		return NewUserNotFoundError(userID)
 	}
 
 	// Check if whitelist already exists
 	var whitelist models.ModelWhitelist
-	err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).First(&whitelist).Error
+	err = s.db.DB.Where("target_type = ? AND target_identifier = ?",
+		models.TargetTypeUser, userID).First(&whitelist).Error
 
 	if err == nil {
 		// Check if models are the same
@@ -65,7 +63,7 @@ func (s *PermissionService) SetUserWhitelist(employeeNumber string, modelList []
 		// Create new whitelist
 		whitelist = models.ModelWhitelist{
 			TargetType:       models.TargetTypeUser,
-			TargetIdentifier: employeeNumber,
+			TargetIdentifier: userID,
 		}
 		whitelist.SetAllowedModelsFromSlice(modelList)
 		if err := s.db.DB.Create(&whitelist).Error; err != nil {
@@ -73,20 +71,21 @@ func (s *PermissionService) SetUserWhitelist(employeeNumber string, modelList []
 		}
 	}
 
-	// Update employee permissions
-	if err := s.UpdateEmployeePermissions(employeeNumber); err != nil {
-		logger.Logger.Error("Failed to update employee permissions",
-			zap.String("employee_number", employeeNumber),
+	// Update user permissions using employee_number for department lookup
+	if err := s.UpdateEmployeePermissions(user.EmployeeNumber); err != nil {
+		logger.Logger.Error("Failed to update user permissions",
+			zap.String("user_id", userID),
+			zap.String("employee_number", user.EmployeeNumber),
 			zap.Error(err))
 		// Continue execution - whitelist is already saved
 	}
 
 	// Record audit
 	auditDetails := map[string]interface{}{
-		"employee_number": employeeNumber,
-		"models":          modelList,
+		"user_id": userID,
+		"models":  modelList,
 	}
-	s.recordAudit(models.OperationWhitelistSet, models.TargetTypeUser, employeeNumber, auditDetails)
+	s.recordAudit(models.OperationWhitelistSet, models.TargetTypeUser, userID, auditDetails)
 
 	return nil
 }
@@ -154,7 +153,7 @@ func (s *PermissionService) SetDepartmentWhitelist(departmentName string, modelL
 func (s *PermissionService) GetUserEffectivePermissions(employeeNumber string) ([]string, error) {
 	// Get effective permissions directly, no need to check if employee exists
 	var effectivePermission models.EffectivePermission
-	err := s.db.DB.Where("employee_number = ?", employeeNumber).First(&effectivePermission).Error
+	err := s.db.DB.Where("user_id = ?", employeeNumber).First(&effectivePermission).Error
 	if err != nil {
 		return []string{}, nil // Return empty slice if no permissions found
 	}
@@ -176,10 +175,18 @@ func (s *PermissionService) GetDepartmentEffectivePermissions(departmentName str
 
 // UpdateEmployeePermissions updates effective permissions for an employee
 func (s *PermissionService) UpdateEmployeePermissions(employeeNumber string) error {
+	// First, get user_id from auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+	if err != nil {
+		// User doesn't exist in auth_users table, skip processing
+		return nil
+	}
+	userID := user.ID
+
 	// Get employee info (optional for non-existent users)
 	var employee models.EmployeeDepartment
 	var departments []string
-	var err error
 
 	err = s.db.DB.Where("employee_number = ?", employeeNumber).First(&employee).Error
 	if err != nil {
@@ -194,7 +201,7 @@ func (s *PermissionService) UpdateEmployeePermissions(employeeNumber string) err
 	// Get current effective permissions from database (if exists)
 	var currentEffectiveModels []string
 	var existingEffectivePermission models.EffectivePermission
-	err = s.db.DB.Where("employee_number = ?", employeeNumber).First(&existingEffectivePermission).Error
+	err = s.db.DB.Where("user_id = ?", userID).First(&existingEffectivePermission).Error
 	if err == nil {
 		currentEffectiveModels = existingEffectivePermission.GetEffectiveModelsAsSlice()
 	} else {
@@ -203,7 +210,7 @@ func (s *PermissionService) UpdateEmployeePermissions(employeeNumber string) err
 	}
 
 	// Calculate new effective permissions
-	newEffectiveModels, whitelistID := s.calculateEffectivePermissions(employeeNumber, departments)
+	newEffectiveModels, whitelistID := s.calculateEffectivePermissions(userID, departments)
 
 	// Check if permissions have actually changed
 	permissionsChanged := !s.slicesEqual(currentEffectiveModels, newEffectiveModels)
@@ -224,8 +231,8 @@ func (s *PermissionService) UpdateEmployeePermissions(employeeNumber string) err
 	} else {
 		// Create new record
 		effectivePermission := models.EffectivePermission{
-			EmployeeNumber: employeeNumber,
-			WhitelistID:    whitelistID,
+			UserID:      userID,
+			WhitelistID: whitelistID,
 		}
 		effectivePermission.SetEffectiveModelsFromSlice(newEffectiveModels)
 		if err := s.db.DB.Create(&effectivePermission).Error; err != nil {
@@ -269,9 +276,20 @@ func (s *PermissionService) UpdateEmployeePermissions(employeeNumber string) err
 		zap.String("notification_reason", notificationReason))
 
 	if shouldNotify && s.aigatewayClient != nil {
-		if err := s.aigatewayClient.SetUserPermission(employeeNumber, newEffectiveModels); err != nil {
+		// Convert employee_number back to user_id for Higress API
+		var user models.UserInfo
+		err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+		if err != nil {
+			logger.Logger.Error("Failed to find user by employee_number for Higress call",
+				zap.String("employee_number", employeeNumber),
+				zap.Error(err))
+			return nil // Don't fail the entire operation if Higress update fails
+		}
+
+		if err := s.aigatewayClient.SetUserPermission(user.ID, newEffectiveModels); err != nil {
 			logger.Logger.Error("Failed to update Higress permissions",
 				zap.String("employee_number", employeeNumber),
+				zap.String("user_id", user.ID),
 				zap.Strings("previous_models", currentEffectiveModels),
 				zap.Strings("new_models", newEffectiveModels),
 				zap.String("reason", notificationReason),
@@ -279,6 +297,7 @@ func (s *PermissionService) UpdateEmployeePermissions(employeeNumber string) err
 		} else {
 			logger.Logger.Info("Successfully updated Aigateway permissions",
 				zap.String("employee_number", employeeNumber),
+				zap.String("user_id", user.ID),
 				zap.Strings("previous_models", currentEffectiveModels),
 				zap.Strings("new_models", newEffectiveModels),
 				zap.String("reason", notificationReason))
@@ -332,15 +351,15 @@ func (s *PermissionService) UpdateDepartmentPermissions(departmentName string) e
 	return nil
 }
 
-// calculateEffectivePermissions calculates effective permissions for an employee
-func (s *PermissionService) calculateEffectivePermissions(employeeNumber string, departments []string) ([]string, *int) {
+// calculateEffectivePermissions calculates effective permissions for a user
+func (s *PermissionService) calculateEffectivePermissions(userID string, departments []string) ([]string, *int) {
 	// Priority: User whitelist > Department whitelist (most specific department first)
 	// Note: Empty whitelist (empty model list) is treated as "not configured", continue to check parent level
 
 	// Check user whitelist first
 	var userWhitelist models.ModelWhitelist
 	err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).First(&userWhitelist).Error
+		models.TargetTypeUser, userID).First(&userWhitelist).Error
 	if err == nil {
 		userModels := userWhitelist.GetAllowedModelsAsSlice()
 		// Only return user whitelist if it contains models
@@ -373,10 +392,19 @@ func (s *PermissionService) calculateEffectivePermissions(employeeNumber string,
 
 // ClearUserWhitelist clears personal whitelist for a user (used when department changes)
 func (s *PermissionService) ClearUserWhitelist(employeeNumber string) error {
+	// First, get user_id from auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+	if err != nil {
+		// User doesn't exist in auth_users table, nothing to clear
+		return nil
+	}
+	userID := user.ID
+
 	// Check if user whitelist exists
 	var userWhitelist models.ModelWhitelist
-	err := s.db.DB.Where("target_type = ? AND target_identifier = ?",
-		models.TargetTypeUser, employeeNumber).First(&userWhitelist).Error
+	err = s.db.DB.Where("target_type = ? AND target_identifier = ?",
+		models.TargetTypeUser, userID).First(&userWhitelist).Error
 	if err != nil {
 		// No user whitelist found, nothing to clear
 		return nil
@@ -404,6 +432,15 @@ func (s *PermissionService) ClearUserWhitelist(employeeNumber string) error {
 
 // RemoveUserCompletely removes all data associated with a user when they are deleted
 func (s *PermissionService) RemoveUserCompletely(employeeNumber string) error {
+	// First, get user_id from auth_users table
+	var user models.UserInfo
+	err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+	if err != nil {
+		// User doesn't exist in auth_users table, nothing to remove
+		return nil
+	}
+	userID := user.ID
+
 	// Clear user whitelist (if exists)
 	if err := s.ClearUserWhitelist(employeeNumber); err != nil {
 		logger.Logger.Error("Failed to clear user whitelist during complete removal",
@@ -414,22 +451,34 @@ func (s *PermissionService) RemoveUserCompletely(employeeNumber string) error {
 
 	// Remove effective permissions
 	var effectivePermission models.EffectivePermission
-	err := s.db.DB.Where("employee_number = ?", employeeNumber).First(&effectivePermission).Error
+	err = s.db.DB.Where("user_id = ?", userID).First(&effectivePermission).Error
 	if err == nil {
 		// Record what we're removing for audit
 		removedModels := effectivePermission.GetEffectiveModelsAsSlice()
 
 		// Notify Aigateway to clear permissions if user had any permissions
 		if len(removedModels) > 0 && s.aigatewayClient != nil {
-			if err := s.aigatewayClient.SetUserPermission(employeeNumber, []string{}); err != nil {
-				logger.Logger.Error("Failed to clear Aigateway permissions for removed user",
+			// Convert employee_number back to user_id for Higress API
+			var user models.UserInfo
+			err := s.db.AuthDB.Where("employee_number = ?", employeeNumber).First(&user).Error
+			if err != nil {
+				logger.Logger.Error("Failed to find user by employee_number for Higress call",
 					zap.String("employee_number", employeeNumber),
-					zap.Strings("removed_models", removedModels),
 					zap.Error(err))
+				// Continue without failing the entire operation
 			} else {
-				logger.Logger.Info("Successfully cleared Aigateway permissions for removed user",
-					zap.String("employee_number", employeeNumber),
-					zap.Strings("removed_models", removedModels))
+				if err := s.aigatewayClient.SetUserPermission(user.ID, []string{}); err != nil {
+					logger.Logger.Error("Failed to clear Aigateway permissions for removed user",
+						zap.String("employee_number", employeeNumber),
+						zap.String("user_id", user.ID),
+						zap.Strings("removed_models", removedModels),
+						zap.Error(err))
+				} else {
+					logger.Logger.Info("Successfully cleared Aigateway permissions for removed user",
+						zap.String("employee_number", employeeNumber),
+						zap.String("user_id", user.ID),
+						zap.Strings("removed_models", removedModels))
+				}
 			}
 		}
 
