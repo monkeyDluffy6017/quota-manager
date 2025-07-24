@@ -22,6 +22,7 @@ import (
 type QuotaService struct {
 	db              *database.DB
 	aiGatewayConf   *config.AiGatewayConfig
+	config          *config.Config
 	aiGatewayClient interface {
 		QueryGithubStarProjects(employeeNumber string) (*aigateway.StarProjectsResponse, error)
 		SetGithubStarProjects(employeeNumber string, starredProjects string) error
@@ -30,13 +31,14 @@ type QuotaService struct {
 }
 
 // NewQuotaService creates a new quota service
-func NewQuotaService(db *database.DB, aiGatewayConf *config.AiGatewayConfig, aiGatewayClient interface {
+func NewQuotaService(db *database.DB, config *config.Config, aiGatewayClient interface {
 	QueryGithubStarProjects(employeeNumber string) (*aigateway.StarProjectsResponse, error)
 	SetGithubStarProjects(employeeNumber string, starredProjects string) error
 }, voucherSvc *VoucherService) *QuotaService {
 	return &QuotaService{
 		db:              db,
-		aiGatewayConf:   aiGatewayConf,
+		aiGatewayConf:   &config.AiGateway,
+		config:          config,
 		aiGatewayClient: aiGatewayClient,
 		voucherSvc:      voucherSvc,
 	}
@@ -237,13 +239,13 @@ func (s *QuotaService) GetQuotaAuditRecords(userID string, page, pageSize int) (
 func (s *QuotaService) TransferOut(giver *models.AuthUser, req *TransferOutRequest) (*TransferOutResponse, error) {
 	// Check if receiver_id is empty
 	if req.ReceiverID == "" {
-		return nil, fmt.Errorf("receiver_id cannot be empty")
+		return nil, NewValidationFailedError("receiver_id cannot be empty")
 	}
 
 	// Get used quota from AiGateway to check availability
 	usedQuota, err := s.getUsedQuotaFromAiGateway(giver.ID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get used quota: %w", err)
+		return nil, NewDatabaseError("get used quota", err)
 	}
 
 	// Get quota list ordered by expiry date to check availability
@@ -282,6 +284,50 @@ func (s *QuotaService) TransferOut(giver *models.AuthUser, req *TransferOutReque
 		}
 	}()
 
+	// Debug: Print config info
+	fmt.Printf("DEBUG: GitHub star check config - Enabled: %v, RequiredRepo: %s\n",
+		s.config.GithubStarCheck.Enabled, s.config.GithubStarCheck.RequiredRepo)
+
+	// Get giver's starred projects from database
+	var giverGithubStar string
+	var userInfo models.UserInfo
+	if err := s.db.AuthDB.Where("id = ?", giver.ID).First(&userInfo).Error; err == nil {
+		// Store all starred projects as comma-separated string
+		giverGithubStar = userInfo.GithubStar
+		// Debug: Print user info from database
+		fmt.Printf("DEBUG: User info from database - ID: %s, GithubStar: %s\n", userInfo.ID, userInfo.GithubStar)
+	}
+
+	// checkGithubStar checks if user has starred the required GitHub repository
+	if s.config.GithubStarCheck.Enabled {
+		// Debug: Print star check info
+		fmt.Printf("DEBUG: GitHub star check enabled, required repo: %s, user starred projects: %s\n",
+			s.config.GithubStarCheck.RequiredRepo, giverGithubStar)
+
+		isStar := false
+		// Parse comma-separated starred projects
+		starredProjects := strings.Split(giverGithubStar, ",")
+
+		// Debug: Print parsed projects
+		fmt.Printf("DEBUG: Parsed starred projects: %v\n", starredProjects)
+
+		// Check if required repo is starred
+		requiredRepo := strings.TrimSpace(s.config.GithubStarCheck.RequiredRepo)
+		for _, project := range starredProjects {
+			project = strings.TrimSpace(project)
+			if project == requiredRepo {
+				isStar = true
+				fmt.Printf("DEBUG: Found required repo %s in user's starred projects\n", requiredRepo)
+			}
+		}
+
+		if isStar == false {
+			fmt.Printf("DEBUG: User has not starred required repo %s, returning error\n", requiredRepo)
+			return nil, NewGithubStarRequiredError(requiredRepo)
+		}
+		fmt.Printf("DEBUG: User has starred required repo %s, allowing transfer\n", requiredRepo)
+	}
+
 	// Validate quota availability for each requested quota
 	for _, quotaItem := range req.QuotaList {
 		dateKey := quotaItem.ExpiryDate.Format("2006-01-02T15:04:05Z07:00")
@@ -299,6 +345,13 @@ func (s *QuotaService) TransferOut(giver *models.AuthUser, req *TransferOutReque
 
 		// Also validate the total quota exists in database for this expiry date
 		var totalQuotaAmount float64
+		// Log the query parameters for debugging
+		logger.Info("Checking quota availability",
+			zap.String("user_id", giver.ID),
+			zap.Time("expiry_date", quotaItem.ExpiryDate),
+			zap.Float64("requested_amount", quotaItem.Amount),
+			zap.String("status", models.StatusValid))
+
 		if err := tx.Model(&models.Quota{}).
 			Where("user_id = ? AND expiry_date = ? AND status = ?",
 				giver.ID, quotaItem.ExpiryDate, models.StatusValid).
@@ -307,6 +360,12 @@ func (s *QuotaService) TransferOut(giver *models.AuthUser, req *TransferOutReque
 			tx.Rollback()
 			return nil, fmt.Errorf("failed to check quota for expiry date %v: %w", quotaItem.ExpiryDate, err)
 		}
+
+		// Log the result of the query
+		logger.Info("Quota availability check result",
+			zap.Float64("total_quota_amount", totalQuotaAmount),
+			zap.Float64("requested_amount", quotaItem.Amount),
+			zap.Bool("sufficient_quota", totalQuotaAmount >= quotaItem.Amount))
 
 		if totalQuotaAmount < quotaItem.Amount {
 			tx.Rollback()
@@ -322,14 +381,6 @@ func (s *QuotaService) TransferOut(giver *models.AuthUser, req *TransferOutReque
 			Amount:     item.Amount,
 			ExpiryDate: item.ExpiryDate,
 		}
-	}
-
-	// Get giver's starred projects from database
-	var giverGithubStar string
-	var userInfo models.UserInfo
-	if err := s.db.AuthDB.Where("id = ?", giver.ID).First(&userInfo).Error; err == nil {
-		// Store all starred projects as comma-separated string
-		giverGithubStar = userInfo.GithubStar
 	}
 
 	// Clean receiver_id to remove leading/trailing whitespace before generating voucher

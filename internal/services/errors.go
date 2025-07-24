@@ -14,12 +14,13 @@ func (e *ServiceError) Error() string {
 
 // Error constants for service operations
 const (
-	ErrorUserNotFound     = "user_not_found"
-	ErrorDeptNotFound     = "department_not_found"
-	ErrorDatabaseError    = "database_error"
-	ErrorValidationFailed = "validation_failed"
-	ErrorResourceNotFound = "resource_not_found"
-	ErrorConflict         = "conflict"
+	ErrorUserNotFound       = "quota-manager.user_not_found"
+	ErrorDeptNotFound       = "quota-manager.department_not_found"
+	ErrorDatabaseError      = "quota-manager.database_error"
+	ErrorValidationFailed   = "quota-manager.validation_failed"
+	ErrorResourceNotFound   = "quota-manager.resource_not_found"
+	ErrorConflict           = "quota-manager.conflict"
+	ErrorGithubStarRequired = "quota-manager.github_star_required"
 )
 
 // NewUserNotFoundError creates a new user not found error
@@ -67,5 +68,13 @@ func NewConflictError(message string) *ServiceError {
 	return &ServiceError{
 		Code:    ErrorConflict,
 		Message: message,
+	}
+}
+
+// NewGithubStarRequiredError creates a new GitHub star required error
+func NewGithubStarRequiredError(repo string) *ServiceError {
+	return &ServiceError{
+		Code:    ErrorGithubStarRequired,
+		Message: fmt.Sprintf("user must star the GitHub repository '%s' to transfer quota", repo),
 	}
 }
